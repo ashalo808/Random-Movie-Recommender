@@ -1,0 +1,24 @@
+# Python venv and caches
+.venv/
+__pycache__/
+*.pyc
+
+# Pytest cache
+.pytest_cache/
+
+# Local error/log files
+error.log
+
+# Local config and secrets
+config.py
+.env
+.env.*
+
+# Tests (do not upload)
+tests/
+
+# Cache / data
+data/
+
+# Editor
+.vscode/
