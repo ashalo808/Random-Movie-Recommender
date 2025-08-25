@@ -14,6 +14,15 @@ config.py
 .env
 .env.*
 
+# coverage HTML report
+htmlcov/
+
+# coverage data file
+.coverage
+
+# 本地需求文档（中文名）
+需求文档.md
+
 # Tests (do not upload)
 tests/
 
