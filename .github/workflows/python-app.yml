@@ -38,4 +38,6 @@ jobs:
 
       - name: Run tests
         run: |
-          python -m pytest -q
+          # 将当前目录添加到 Python 路径
+          export PYTHONPATH=$PYTHONPATH:$(pwd)
+            python -m pytest -q
