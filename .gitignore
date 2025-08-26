@@ -23,9 +23,6 @@ htmlcov/
 # 本地需求文档（中文名）
 需求文档.md
 
-# Tests (do not upload)
-tests/
-
 # Cache / data
 data/
 
