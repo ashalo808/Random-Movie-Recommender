@@ -35,7 +35,27 @@ jobs:
           python -c "import sys, pprint; pprint.pprint(sys.path)"
           echo "pytest version:"
           python -c "import pytest, sys; print(pytest.__version__ if 'pytest' in sys.modules or hasattr(pytest, '__version__') else 'pytest not imported')"
-
+      
+      - name: Create mock config file for CI
+        run: |
+          echo "Creating mock config.py for tests"
+          cat > config.py << EOF
+          def get_tmdb_key():
+              return "dummy_key_for_tests"
+          
+          def get_config(key=None, default=None):
+              config = {
+                  "API_KEY": "dummy_key_for_tests",
+                  "API_URL": "https://api.themoviedb.org/3",
+                  "DEFAULT_LANGUAGE": "zh-CN",
+                  "DEFAULT_REGION": "CN"
+              }
+              if key:
+                  return config.get(key, default)
+              return config
+          EOF
+          cat config.py
+          
       - name: Run tests
         run: |
           # 将当前目录添加到 Python 路径
