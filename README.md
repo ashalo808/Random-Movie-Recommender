@@ -1,4 +1,3 @@
-```markdown
 # Random Movie Recommender
 
 [Read in Chinese](./README.zh.md)
