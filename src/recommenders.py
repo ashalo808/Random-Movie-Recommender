@@ -1,14 +1,14 @@
 import math
 import random
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 from collections import defaultdict
 from datetime import datetime, timezone
+from src.preferences import get_effective_preferences
 
 logger = logging.getLogger(__name__)
 
 def sanitize_movies(movies: list) -> list:
-    # ...existing code...
     if not movies:
         return []
 
@@ -118,17 +118,19 @@ def score_movies(movies: list, preferences: Optional[Dict[str, Any]] = None) -> 
       - weights: dict with keys popularity, rating, freshness, genre_boost
       - recency_years: int
     """
-    prefs = preferences or {}
-    preferred_genres = set(prefs.get("preferred_genres") or [])
-    exclude_genres = set(prefs.get("exclude_genres") or [])
-    exclude_adult = bool(prefs.get("exclude_adult")) if "exclude_adult" in prefs else True
-    min_vote_count = int(prefs.get("min_vote_count", 0))
-    weights = prefs.get("weights", {})
+    # 加载配置文件中的偏好，并与传入的偏好合并
+    effective_prefs = get_effective_preferences(preferences)
+    
+    preferred_genres = set(effective_prefs.get("preferred_genres") or [])
+    exclude_genres = set(effective_prefs.get("exclude_genres") or [])
+    exclude_adult = bool(effective_prefs.get("exclude_adult")) if "exclude_adult" in effective_prefs else True
+    min_vote_count = int(effective_prefs.get("min_vote_count", 0))
+    weights = effective_prefs.get("weights", {})
     w_pop = float(weights.get("popularity", 0.5))
     w_rating = float(weights.get("rating", 0.3))
     w_fresh = float(weights.get("freshness", 0.2))
     genre_boost = float(weights.get("genre_boost", 0.3))
-    recency_years = int(prefs.get("recency_years", 10))
+    recency_years = int(effective_prefs.get("recency_years", 10))
 
     sanitized = sanitize_movies(movies)
     if not sanitized:
@@ -168,8 +170,8 @@ def score_movies(movies: list, preferences: Optional[Dict[str, Any]] = None) -> 
                 base_score += genre_boost * (overlap / max(1, len(preferred_genres)))
         scored.append((m, float(base_score)))
         
-    if prefs.get("temporal_balance"):
-        strength = float(prefs.get("temporal_balance_strength", 0.7))  # 0..1, 越大平衡越强
+    if effective_prefs.get("temporal_balance"):
+        strength = float(effective_prefs.get("temporal_balance_strength", 0.7))  # 0..1, 越大平衡越强
         # 统计年份分布
         year_counts = {}
         for m, s in scored:
@@ -196,9 +198,11 @@ def pick_random_movie(movies: list, preferences: Optional[Dict[str, Any]] = None
       - temporal_balance: bool
       - temporal_balance_strength: float
     """
-    prefs = preferences or {}
-    temperature = float(prefs.get("temperature", 1.0))
-    scored = score_movies(movies, preferences=prefs)
+    # 加载配置文件中的偏好，并与传入的偏好合并
+    effective_prefs = get_effective_preferences(preferences)
+    
+    temperature = float(effective_prefs.get("temperature", 1.0))
+    scored = score_movies(movies, preferences=effective_prefs)
     if not scored:
         return None
     movies_list, scores = zip(*scored)
@@ -220,46 +224,111 @@ def pick_random_movie(movies: list, preferences: Optional[Dict[str, Any]] = None
     topk = movies_list[:min(10, len(movies_list))]
     return rnd.choice(list(topk))
 
-def recommend_batch(movies: list, n: int = 5, preferences: Optional[Dict[str, Any]] = None, seed: Optional[int] = None, diversify_by: Optional[str] = "genre") -> List[Dict[str, Any]]:
+def recommend_batch(movies: list, n: int = 5, preferences: Optional[Dict[str, Any]] = None, 
+                   seed: Optional[int] = None, diversify_by: Optional[str] = "genre",
+                   exclude_ids: Optional[Set[int]] = None) -> List[Dict[str, Any]]:
     """
     返回 n 个不重复的推荐。策略：
       - 先根据 score 排序
       - 按概率或贪心抽取，尝试多样化（不同 genre）
-    diversify_by: "genre" 或 None
+    diversify_by: "genre", "year" 或 None
+    exclude_ids: 要排除的电影ID集合（防止重复推荐）
     """
     if n <= 0:
         return []
-    scored = score_movies(movies, preferences)
+    
+    # 加载配置文件中的偏好，并与传入的偏好合并
+    effective_prefs = get_effective_preferences(preferences)
+    
+    # 如果未在函数参数中指定多样化方式，则从配置文件中读取
+    if diversify_by is None:
+        diversify_by = effective_prefs.get("diversify_by", "genre")
+    
+    # 过滤已推荐的电影ID
+    if exclude_ids:
+        filtered_movies = []
+        for movie in movies:
+            if isinstance(movie, dict) and "id" in movie:
+                if movie["id"] not in exclude_ids:
+                    filtered_movies.append(movie)
+            else:
+                filtered_movies.append(movie)
+        
+        # 如果过滤后电影数量太少，使用原始列表
+        if len(filtered_movies) < max(n, 10):  # 保留至少10部用于推荐
+            filtered_movies = movies
+    else:
+        filtered_movies = movies
+    
+    scored = score_movies(filtered_movies, preferences=effective_prefs)
     if not scored:
         return []
+    
     items = [m for m, s in scored]
+    scores = [s for _, s in scored]
     rnd = random.Random(seed)
+    
     if n >= len(items):
         return items.copy()
 
+    # 获取每个类型最多可出现的电影数量
+    max_per_genre = int(effective_prefs.get("max_items_per_genre", 2))
+
     chosen = []
-    used_genres = set()
+    genre_counts = defaultdict(int)  # 记录已选类型的数量
+    year_counts = defaultdict(int)   # 记录已选年份的数量
     attempts = 0
     idx_pool = list(range(len(items)))
+    
     while len(chosen) < n and attempts < len(items) * 2:
         attempts += 1
+        
         # 按指数衰减概率（更高分更可能）
-        weights = [max(0.001, s) for _, s in scored]
+        weights = [max(0.001, scores[j]) for j in idx_pool]
         try:
-            i = rnd.choices(idx_pool, weights=[weights[j] for j in idx_pool], k=1)[0]
+            i = rnd.choices(idx_pool, weights=weights, k=1)[0]
         except Exception:
-            i = rnd.choice(idx_pool)
+            if idx_pool:
+                i = rnd.choice(idx_pool)
+            else:
+                break
+                
         candidate = items[i]
+        
+        # 应用多样性策略
         if diversify_by == "genre":
-            gids = tuple(sorted(set(candidate.get("genre_ids") or [])))
-            if gids and gids in used_genres:
-                # 有相同主 genre 的尽量避免，尝试跳过
+            # 检查类型限制
+            genre_ids = candidate.get("genre_ids") or []
+            skip = False
+            
+            for gid in genre_ids:
+                if genre_counts[gid] >= max_per_genre:
+                    skip = True
+                    break
+                    
+            if skip and len(chosen) < n-1 and attempts < len(items):
+                # 类型已满额，尝试跳过（除非是最后几个选择）
                 idx_pool.remove(i)
                 continue
-            used_genres.add(gids)
+                
+            # 更新类型计数
+            for gid in genre_ids:
+                genre_counts[gid] += 1
+                
+        elif diversify_by == "year":
+            # 年份多样性
+            year_str = (candidate.get("release_date") or "")[:4]
+            if year_str and year_counts[year_str] >= 2:  # 每个年份最多2部
+                if len(chosen) < n-1 and attempts < len(items):
+                    idx_pool.remove(i)
+                    continue
+            if year_str:
+                year_counts[year_str] += 1
+                
         chosen.append(candidate)
         if i in idx_pool:
             idx_pool.remove(i)
+            
     # 如果不够，补齐前 n 个
     if len(chosen) < n:
         for it in items:
@@ -267,6 +336,7 @@ def recommend_batch(movies: list, n: int = 5, preferences: Optional[Dict[str, An
                 chosen.append(it)
             if len(chosen) >= n:
                 break
+                
     return chosen[:n]
 
 # 保留向后兼容的接口名

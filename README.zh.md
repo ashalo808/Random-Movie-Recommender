@@ -2,15 +2,18 @@
 
 [Read in English](./README.md)
 
-简单的命令行工具，从电影数据库随机挑选并展示电影信息，适合作为学习 API、JSON 与随机算法的练手项目。
+一个基于 Flask 的 Web 应用，从 TMDb API 获取电影数据，进行随机推荐，支持缓存、收藏和类型过滤。适合学习 API 调用、推荐算法和 Web 开发。
 
 ## 主要功能
-- 随机推荐电影（单片/批量）
-- 显示片名、年份、评分、类型与简介（带 emoji 提升可读性）
-- 可缓存结果以减少 API 请求
+- 随机推荐电影（单片/批量，支持类型过滤）
+- 显示电影详情（片名、年份、评分、类型、简介）
+- 本地缓存以减少 API 请求
+- Web 界面：下拉选择类型、推荐按钮、收藏管理
+- 持久化收藏（存储在 data/favorites.json）
 
 ## 要求
 - Python 3.8+
+- Flask
 - requests
 
 ## 安装
@@ -18,35 +21,42 @@
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt    # 若无 requirements.txt，则 pip install requests
+pip install -r requirements.txt    # 若无 requirements.txt，则 pip install flask requests
 ```
 
 ## 配置 API Key
-程序使用 TMDb（The Movie Database）API。获取 Key 后有两种方式配置：
+程序使用 TMDb API。获取 Key 后设置环境变量：
 
-1. 环境变量（推荐）：
-```powershell
-$env:TMDB_API_KEY = "你的_api_key"
-```
+### 获取 TMDB API 密钥：
+访问 [TMDB 网站](https://www.themoviedb.org/)，注册并生成 API 密钥（v3 auth key）。
 
-2. 或在项目根目录创建 `config.py`（示例）：
-```python
-def get_tmdb_key():
-    return "你的_api_key"
-```
+### 在终端中设置环境变量并运行：
+1. 停止当前应用（按 Ctrl+C）。
+2. 在 PowerShell 中运行：
+   ```
+   $env:TMDB_API_KEY = "YOUR_API_KEY_HERE"
+   python app.py
+   ```
+3. 或在 CMD 中运行：
+   ```
+   set TMDB_API_KEY=YOUR_API_KEY_HERE
+   python app.py
+   ```
+4. 将 `YOUR_API_KEY_HERE` 替换为您的实际密钥。
+
+### 验证：
+- 应用重启后，访问 http://localhost:5000。
+- 检查终端是否仍有警告。如果仍有问题，请确认密钥正确，并尝试刷新页面或点击“🔄 刷新数据”按钮。
+- 如果您希望永久设置（不每次运行都输入），请在 Windows 系统环境变量中添加 `TMDB_API_KEY`。如果仍有问题，提供更多终端输出。
 
 > 优先使用环境变量，避免将 Key 提交到版本库。
 
 ## 运行
 在激活的虚拟环境中直接执行：
 ```powershell
-python main.py
+python app.py
 ```
-交互说明：
-- 回车：随机推荐一部
-- b：批量推荐（3 个）
-- r：刷新并从 API 重新获取
-- q：退出
+然后在浏览器中访问 http://localhost:5000 使用 Web 界面。
 
 ## 测试
 项目包含 pytest 测试用例（tests/）。运行：
@@ -58,52 +68,38 @@ python -m pytest -q
 ## 项目结构
 ```
 Random Movie Recommender/
-├─ data/                      # 缓存数据
+├─ data/                      # 缓存数据和收藏（favorites.json）
 ├─ src/
-│  ├─ api_client.py
-│  ├─ requester.py
-│  ├─ endpoints.py
-│  ├─ factory.py
-│  ├─ storage.py
-│  ├─ recommenders.py
-│  └─ utils.py
-├─ main.py
-├─ config.py (可选)
+│  ├─ api_client.py          # TMDb API 客户端
+│  ├─ requester.py           # 请求封装
+│  ├─ endpoints.py           # API 端点处理
+│  ├─ factory.py             # 客户端工厂
+│  ├─ storage.py             # 数据存储与缓存
+│  ├─ recommenders.py        # 推荐算法
+│  ├─ utils.py               # 工具函数（格式化、过滤等）
+│  ├─ preferences.py         # 用户偏好设置
+│  ├─ retry_policy.py        # 重试策略
+├─ tests/                     # 单元测试
+│  ├─ test_api.py
+│  ├─ test_endpoints.py
+│  ├─ test_factory.py
+│  ├─ test_recommenders.py
+│  ├─ test_storage.py
+│  ├─ test_utils.py
+│  └─ conftest.py
+├─ app.py                     # Flask 后端应用
+├─ index.html                 # Web 前端界面
+├─ config.py (可选)           # 配置（可选）
 └─ README.md
 ```
 
 ## 常见问题
-- 推荐结果重复或同年代：检查 `load_or_fetch` 的分页与缓存策略，确保随机页与缓存键包含页码与查询参数。
-- 无法请求 API：确认网络/代理与 TMDB_API_KEY 是否正确。
-
-## 未来改进（短期优先）
-
-后续迭代将优先提升用户体验、可靠性与常用功能，短期计划如下：
-
-1. 类型过滤与模糊匹配（优先级：高）
-   - 支持用户按类型（中文/英文）筛选推荐。
-   - 优先使用 TMDb 的 genre list 做 name→id 映射；不可用时在 movie.genres、genre_ids、title、overview 中做模糊匹配。
-   - 交互：首次可输入类型，运行时可用 g 命令设置/取消。
-   - 验收：已知类型只从匹配结果中推荐；未知类型提示并回退。
-
-2. 单元测试与 CI（优先级：高）
-   - 为 storage、recommenders、utils、类型过滤等关键模块补充单元测试。
-   - 使用请求模拟（responses / requests-mock）模拟 TMDb 接口。
-   - 添加 GitHub Actions 在 push/PR 时运行 pytest。
-   - 验收：CI 成功运行测试，核心逻辑有单元覆盖。
-
-3. 更智能的缓存（按查询缓存）（优先级：中）
-   - 按查询参数与页码生成缓存分片（hash 命名），避免不同查询共用单一缓存。
-   - 保留 TTL，支持手动清理与强制刷新（r 命令）。
-   - 验收：不同查询生成不同缓存文件；强制刷新可绕过缓存。
-
-4. 收藏（持久化用户偏好）（优先级：中）
-   - 允许用户将推荐保存为本地收藏（data/favorites.json），并支持列出/删除/导入/导出。
-   - 交互命令示例：`f` 保存当前，`fav-list` 列表，`fav-remove` 删除。
-   - 验收：收藏持久化，能导出/导入 JSON。
+- 下拉菜单无选项：确认 TMDB_API_KEY 已正确设置，检查终端输出是否有 500 错误。
+- 推荐结果重复：检查缓存策略，确保随机页与查询参数正确。
+- API 请求失败：确认网络/代理与 TMDB_API_KEY 是否正确。
 
 ## 贡献
-欢迎提交 issue 或 PR。请在 PR 中说明改动目的并附带单元测试（如适用）。
+欢迎提交 issue 或 PR。请在 PR 中说明改动目的并附带单元测试。
 
 ## 许可证
 MIT

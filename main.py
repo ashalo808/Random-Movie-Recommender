@@ -13,10 +13,15 @@ from datetime import datetime
 from config import get_tmdb_key
 from src import storage
 from src.utils import format_movie, ensure_positive_int, validate_api_key, get_genre_map, filter_by_genre
-from src.requester import send_request
+# 将 send_request 替换为 Requester，以便使用统一的错误/重试封装
+from src.requester import Requester
 from src.endpoints import POPULAR, SEARCH, make_endpoint
 from src.api_client import ApiClient
 from src.recommenders import pick_random_movie, recommend_batch
+from src.preferences import (
+    load_preferences, save_preferences, validate_preferences, 
+    create_default_preferences_if_missing, DEFAULT_PREFERENCES
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -86,17 +91,6 @@ def _extract_total_pages(resp: dict) -> int:
     """从响应中提取总页数，并限制最大页数为500"""
     if not isinstance(resp, dict):
         return 1
-    d = resp.get("data") if isinstance(resp.get("data"), dict) else resp
-    tp = d.get("total_pages") if isinstance(d, dict) else None
-    try:
-        return max(1, min(int(tp) if tp is not None else 1, 500))
-    except Exception:
-        return 1
-
-def _extract_total_pages(resp: dict) -> int:
-    """从响应中提取总页数，并限制最大页数为500"""
-    if not isinstance(resp, dict):
-        return 1
     # 兼容不同结构：优先 data.total_pages，其次直接 total_pages，再退回 1
     d = resp.get("data") if isinstance(resp.get("data"), dict) else resp
     tp = None
@@ -147,11 +141,21 @@ def _tag_movies_with_era(movies: list) -> list:
         tagged.append(m)
     return tagged
 
-def load_or_fetch(client: ApiClient, force_fetch: bool = False, max_random_page: int = 10) -> dict:
+def show_metrics(client: ApiClient) -> None:
+    """展示 ApiClient 的简单 metrics（requests/retries/failures）"""
+    try:
+        metrics = client.get_metrics()
+    except Exception:
+        metrics = {}
+    print("请求统计:", metrics)
+
+def load_or_fetch(client: ApiClient, requester: Requester | None = None, force_fetch: bool = False, max_random_page: int = 10) -> dict:
     """
     按 era_ranges 随机构造查询 params，从 per-query 缓存读取（load_json_for_query），
     如果缓存不可用或 force_fetch 为 True 则调用 client.discover_movies 请求并保存到 per-query 缓存。
     返回合并的 dict: {"results": [...]}（保留原结构兼容性）。
+
+    当 requester 可用时优先通过 requester.discover_movies 获取（便于统一错误提示）。
     """
     results_acc: list = []
     try:
@@ -162,7 +166,6 @@ def load_or_fetch(client: ApiClient, force_fetch: bool = False, max_random_page:
                 "primary_release_year": year,
                 "page": page,
                 "sort_by": "popularity.desc",
-                # 临时放宽门槛，便于调试：大多数条目 vote_count 可能 <50
                 "vote_count.gte": 1
             }
             logging.info("📡 查询 %s 年份 %d（页 %d） 参数: %s", era_name, year, page, params)
@@ -182,30 +185,27 @@ def load_or_fetch(client: ApiClient, force_fetch: bool = False, max_random_page:
                 results_acc.extend(cached.get("results") or [])
                 continue
 
-            # 缓存不可用或强制刷新，发起请求
+            # 缓存不可用或强制刷新，发起请求（优先使用 requester 以获得友好提示）
+            resp = None
             try:
-                logging.debug("发起 TMDb discover 请求 params=%s", params)
-                resp = client.discover_movies(params)
+                if requester:
+                    logging.debug("使用 Requester 发起 discover 请求 params=%s", params)
+                    resp = requester.discover_movies(params)
+                else:
+                    logging.debug("使用 ApiClient 直接发起 discover 请求 params=%s", params)
+                    resp = client.discover_movies(params)
             except Exception as e:
                 logging.warning("⚠️ TMDb 请求 %s 年代失败：%s", era_name, e)
                 resp = None
-                # fallback: 尝试用 requester 直接发起请求
-                try:
-                    sess = getattr(client, "session", requests.Session())
-                    raw = send_request(sess, getattr(client, "base_url", "https://api.themoviedb.org/3"), "GET", "discover/movie", params=params)
-                    logging.debug("requester fallback raw keys: %s", list(raw.keys()) if isinstance(raw, dict) else type(raw))
-                    if raw and raw.get("results"):
-                        resp = {"success": True, "results": raw.get("results") or [], "data": raw.get("data") if isinstance(raw, dict) else raw}
-                    else:
-                        logging.warning("requester fallback 未返回 results: %s", raw)
-                        resp = None
-                except Exception as e2:
-                    logging.warning("requester fallback 异常: %s", e2)
-                    resp = None
 
             # 检查响应
             if not isinstance(resp, dict) or not resp.get("success") or not resp.get("results"):
                 logging.warning("⚠️ %s 年代无有效结果或请求失败（resp=%s）", era_name, type(resp))
+                # 在发生错误时展示 metrics 以便排查（不会终止流程）
+                try:
+                    show_metrics(client)
+                except Exception:
+                    pass
                 continue
 
             # 记录响应结果数量
@@ -224,7 +224,7 @@ def load_or_fetch(client: ApiClient, force_fetch: bool = False, max_random_page:
 
             results_acc.extend(resp.get("results") or [])
 
-        # 最终去重并返回
+        # 最终去重并返回（保持原有逻辑）
         logging.debug("合并前总条目数：%d", len(results_acc))
         seen = set()
         deduped = []
@@ -249,10 +249,291 @@ def load_or_fetch(client: ApiClient, force_fetch: bool = False, max_random_page:
     except Exception as e:
         logging.exception("load_or_fetch 中发生错误: %s", e)
         return {"results": []}
+
+def recommend_batch(movies: list, n: int = 3, preferences: dict = None, seed: int = None, diversify_by: str = None, exclude_ids: set = None) -> list:
+    """
+    批量推荐电影，支持多样性和排除已推荐的电影ID
     
-def interactive_loop(client: ApiClient):
+    参数:
+        movies: 电影列表（字典对象）
+        n: 返回的推荐数量
+        preferences: 包含权重、temperature等的偏好字典
+        seed: 随机种子（用于可复现性）
+        diversify_by: 多样性类型，可以是 "genre"、"year" 等
+        exclude_ids: 要排除的电影ID集合（防止重复推荐）
+    
+    返回:
+        推荐电影列表，按推荐程度降序
+    """
+    import random
+    import math
+    
+    if not movies or not isinstance(movies, list) or n < 1:
+        return []
+    
+    if seed is not None:
+        random.seed(seed)
+    
+    # 如果传入了排除ID列表，过滤掉这些电影
+    filtered_movies = []
+    if exclude_ids:
+        for movie in movies:
+            movie_id = movie.get("id")
+            if movie_id is not None and movie_id not in exclude_ids:
+                filtered_movies.append(movie)
+        
+        # 如果过滤后电影数量太少（小于请求数量），回退到原始列表
+        if len(filtered_movies) < n:
+            filtered_movies = movies
+    else:
+        filtered_movies = movies
+    
+    # 应用权重并计算推荐分数
+    prefs = preferences or {}
+    weights = prefs.get("weights", {"popularity": 0.4, "rating": 0.4, "freshness": 0.2})
+    temperature = prefs.get("temperature", 2.0)
+    temp_balance = prefs.get("temporal_balance", False)
+    temp_strength = prefs.get("temporal_balance_strength", 1.0)
+    
+    scored_movies = []
+    for movie in filtered_movies:
+        # 基本分数计算（流行度、评分、新鲜度）
+        pop_score = min(1.0, (movie.get("popularity") or 0) / 1000)
+        vote_avg = movie.get("vote_average", 0)
+        rating_score = vote_avg / 10 if vote_avg else 0.5
+        
+        # 新鲜度评分（基于上映日期）
+        release_date = movie.get("release_date", "")
+        freshness = 0.5  # 默认中等新鲜度
+        if release_date:
+            try:
+                year = int(release_date.split("-")[0])
+                current_year = 2025  # 假设当前年份
+                years_diff = current_year - year
+                # 越新鲜分数越高，但超过100年的都算作经典
+                if years_diff <= 0:
+                    freshness = 1.0
+                elif years_diff < 3:
+                    freshness = 0.9
+                elif years_diff < 10:
+                    freshness = 0.8
+                elif years_diff < 20:
+                    freshness = 0.6
+                elif years_diff < 50:
+                    freshness = 0.4
+                else:
+                    freshness = 0.3
+            except Exception:
+                pass
+                
+        # 计算加权总分
+        w_pop = weights.get("popularity", 0.4)
+        w_rating = weights.get("rating", 0.4)
+        w_freshness = weights.get("freshness", 0.2)
+        
+        base_score = (
+            w_pop * pop_score + 
+            w_rating * rating_score + 
+            w_freshness * freshness
+        )
+        
+        # 添加随机因素（温度）
+        if temperature > 0:
+            noise = random.random() * temperature
+            score = base_score + noise
+        else:
+            score = base_score
+            
+        scored_movies.append((movie, score))
+    
+    # 按分数排序
+    scored_movies.sort(key=lambda x: x[1], reverse=True)
+    top_movies = [m for m, _ in scored_movies[:n*2]]  # 选择更多备选
+    
+    # 应用多样性（如果指定）
+    result = []
+    if diversify_by and diversify_by == "genre" and len(top_movies) > n:
+        # 选择多样化的电影（按类型）
+        selected_genres = set()
+        for movie in top_movies:
+            # 获取电影类型
+            genres = []
+            if "genre_ids" in movie:
+                genres = movie["genre_ids"]
+            elif "genres" in movie and isinstance(movie["genres"], list):
+                genres = [g.get("id") for g in movie["genres"] if isinstance(g, dict)]
+            
+            # 检查是否与已选类型重叠
+            overlap = False
+            for genre in genres:
+                if genre in selected_genres:
+                    overlap = True
+                    break
+            
+            # 如果没有重叠或已经选够了，添加到结果
+            if not overlap or len(result) >= n-1:
+                result.append(movie)
+                # 记录此电影的类型
+                for genre in genres:
+                    if genre:
+                        selected_genres.add(genre)
+            
+            if len(result) >= n:
+                break
+    else:
+        # 简单返回前 N 个
+        result = top_movies[:n]
+    
+    return result
+
+# 添加编辑偏好的交互函数
+def edit_preferences():
+    """交互式编辑偏好设置"""
+    prefs = load_preferences()
+    
+    print("\n📊 推荐偏好设置")
+    print("=" * 40)
+    
+    print("\n1. 权重设置")
+    print("  - popularity (流行度): %.2f" % prefs["weights"].get("popularity", 0.4))
+    print("  - rating (评分): %.2f" % prefs["weights"].get("rating", 0.4))
+    print("  - freshness (新鲜度): %.2f" % prefs["weights"].get("freshness", 0.2))
+    
+    print("\n2. 温度 (temperature): %.1f" % prefs.get("temperature", 2.0))
+    print("   [温度越高，推荐越随机; 温度为0表示固定排序]")
+    
+    print("\n3. 时间平衡: %s" % ("开启" if prefs.get("temporal_balance", True) else "关闭"))
+    print("   [时间平衡确保不同年代的电影都有机会被推荐]")
+    
+    print("\n4. 时间平衡强度: %.1f" % prefs.get("temporal_balance_strength", 1.0))
+    print("   [值越大，年代分布越均匀]")
+    
+    print("\n5. 批量推荐多样性: %s" % (prefs.get("diversify_by", "genre") or "无"))
+    print("   [确保批量推荐结果在指定维度上多样化]")
+    
+    print("\n6. 每类型最大条目数: %d" % prefs.get("max_items_per_genre", 2))
+    print("   [批量推荐时每个类型最多出现的次数]")
+    
+    print("\n7. 重置为默认值")
+    print("8. 保存并返回")
+    print("9. 放弃修改并返回")
+    
+    while True:
+        try:
+            choice = input("\n选择要修改的选项 (1-9) > ").strip()
+            
+            if choice == "9":
+                print("放弃修改。")
+                return
+                
+            if choice == "8":
+                # 验证并保存
+                validated = validate_preferences(prefs)
+                if save_preferences(validated):
+                    print("✅ 偏好已保存。")
+                else:
+                    print("❌ 保存失败，请检查文件权限。")
+                return
+                
+            if choice == "7":
+                # 重置为默认
+                confirm = input("确定要重置所有偏好为默认值吗？(y/n) > ").strip().lower()
+                if confirm == "y":
+                    prefs = DEFAULT_PREFERENCES.copy()
+                    print("✅ 已重置为默认值。")
+                continue
+                
+            if choice == "1":
+                # 编辑权重
+                try:
+                    p_weight = float(input("流行度权重 (0-1) > ").strip() or prefs["weights"].get("popularity", 0.4))
+                    r_weight = float(input("评分权重 (0-1) > ").strip() or prefs["weights"].get("rating", 0.4))
+                    f_weight = float(input("新鲜度权重 (0-1) > ").strip() or prefs["weights"].get("freshness", 0.2))
+                    
+                    # 规范化权重
+                    total = p_weight + r_weight + f_weight
+                    if total > 0:
+                        prefs["weights"]["popularity"] = p_weight / total
+                        prefs["weights"]["rating"] = r_weight / total
+                        prefs["weights"]["freshness"] = f_weight / total
+                        print(f"✅ 权重已更新并归一化：流行度={prefs['weights']['popularity']:.2f}, " +
+                              f"评分={prefs['weights']['rating']:.2f}, 新鲜度={prefs['weights']['freshness']:.2f}")
+                    else:
+                        print("❌ 权重总和必须大于0。")
+                except ValueError:
+                    print("❌ 请输入有效数字。")
+                    
+            elif choice == "2":
+                # 编辑温度
+                try:
+                    temp = float(input("温度 (0-10，推荐2-5) > ").strip() or prefs.get("temperature", 2.0))
+                    prefs["temperature"] = max(0, min(10, temp))
+                    print(f"✅ 温度已设置为：{prefs['temperature']}")
+                except ValueError:
+                    print("❌ 请输入有效数字。")
+                    
+            elif choice == "3":
+                # 编辑时间平衡开关
+                tb = input("时间平衡 (y/n) > ").strip().lower()
+                if tb in ("y", "yes", "1", "true"):
+                    prefs["temporal_balance"] = True
+                    print("✅ 时间平衡已开启。")
+                elif tb in ("n", "no", "0", "false"):
+                    prefs["temporal_balance"] = False
+                    print("✅ 时间平衡已关闭。")
+                else:
+                    print("❌ 未更改时间平衡设置。")
+                    
+            elif choice == "4":
+                # 编辑时间平衡强度
+                try:
+                    tbs = float(input("时间平衡强度 (0-5) > ").strip() or prefs.get("temporal_balance_strength", 1.0))
+                    prefs["temporal_balance_strength"] = max(0, min(5, tbs))
+                    print(f"✅ 时间平衡强度已设置为：{prefs['temporal_balance_strength']}")
+                except ValueError:
+                    print("❌ 请输入有效数字。")
+                    
+            elif choice == "5":
+                # 编辑多样性
+                print("多样性选项：")
+                print("1. 无")
+                print("2. 类型 (genre)")
+                print("3. 年代 (year)")
+                div = input("选择多样性方式 (1-3) > ").strip()
+                
+                if div == "1":
+                    prefs["diversify_by"] = None
+                    print("✅ 批量推荐将不进行多样性处理。")
+                elif div == "2":
+                    prefs["diversify_by"] = "genre"
+                    print("✅ 批量推荐将按类型多样化。")
+                elif div == "3":
+                    prefs["diversify_by"] = "year"
+                    print("✅ 批量推荐将按年代多样化。")
+                else:
+                    print("❌ 未更改多样性设置。")
+                    
+            elif choice == "6":
+                # 编辑每类型最大条目数
+                try:
+                    max_items = int(input("每类型最大条目数 (1-10) > ").strip() or prefs.get("max_items_per_genre", 2))
+                    prefs["max_items_per_genre"] = max(1, min(10, max_items))
+                    print(f"✅ 每类型最大条目数已设置为：{prefs['max_items_per_genre']}")
+                except ValueError:
+                    print("❌ 请输入有效整数。")
+                    
+            else:
+                print("❌ 无效选项，请输入1-9。")
+                
+        except Exception as e:
+            print(f"❌ 处理输入时出错: {e}")
+
+def interactive_loop(client: ApiClient, requester: Requester):
     print("✨ 随机电影推荐器 ✨")
     print("按回车随机推荐一部；输入 b 列出 3 个推荐；输入 r 回源刷新；输入 q 退出。\n")
+
+    # 添加一个集合记录最近推荐过的电影ID，防止短时间内重复推荐
+    recently_recommended_ids = set()
 
     # 获取 TMDb 类型映射（优先中文/英文）
     try:
@@ -358,8 +639,8 @@ def interactive_loop(client: ApiClient):
                 current_genre_name = init_genre
                 print(f"🔎 将尝试基于条目模糊匹配类型：{init_genre}")
 
-    # 载入数据（优先 per-query 缓存）
-    data = load_or_fetch(client, force_fetch=False)
+    # 载入数据（优先 per-query 缓存），传入 requester 以便统一错误处理
+    data = load_or_fetch(client, requester=requester, force_fetch=False)
     if not data:
         print("🚫 无数据可用（既无法从 API 获取也无缓存）。")
         return
@@ -380,7 +661,7 @@ def interactive_loop(client: ApiClient):
 
     try:
         while True:
-            cmd = input("按回车获取推荐 / b 批量 / r 刷新 / g 更改类型 / f 收藏 / fav-list / fav-remove / q 退出 > ").strip().lower()
+            cmd = input("按回车获取推荐 / b 批量 / r 刷新 / g 更改类型 / p 偏好设置 / f 收藏 / fav-list / fav-remove / q 退出 > ").strip().lower()
             if cmd == "q":
                 print("👋 再见！")
                 return
@@ -451,7 +732,10 @@ def interactive_loop(client: ApiClient):
                 continue
 
             if cmd == "r":
-                data = load_or_fetch(client, force_fetch=True)
+                # 刷新时清空已推荐列表，允许重新推荐之前的电影
+                recently_recommended_ids.clear()
+                
+                data = load_or_fetch(client, requester=requester, force_fetch=True)
                 if not data:
                     print("⚠️ 刷新失败，仍使用旧缓存（若有）。")
                     try:
@@ -479,7 +763,30 @@ def interactive_loop(client: ApiClient):
                     "temporal_balance": True,
                     "temporal_balance_strength": 1.5
                 }
-                batch = recommend_batch(filtered_results, n=3, preferences=prefs, seed=None, diversify_by="genre")
+                
+                # 使用随机种子增加多样性
+                random_seed = random.randint(1, 10000)
+                
+                # 传入排除ID列表，防止短期内重复推荐
+                batch = recommend_batch(
+                    filtered_results, 
+                    n=3, 
+                    preferences=prefs, 
+                    seed=random_seed, 
+                    diversify_by="genre",
+                    exclude_ids=recently_recommended_ids
+                )
+                
+                # 记录本次推荐的电影ID
+                for mv in batch:
+                    if "id" in mv and mv["id"]:
+                        recently_recommended_ids.add(mv["id"])
+                
+                # 限制记忆集合大小，避免无限增长
+                if len(recently_recommended_ids) > 50:
+                    # 保留最近的30个ID
+                    recently_recommended_ids = set(list(recently_recommended_ids)[-30:])
+                
                 print("\n🎯 批量推荐：\n")
                 for i, mv in enumerate(batch, 1):
                     mv_disp = dict(mv)
@@ -502,9 +809,24 @@ def interactive_loop(client: ApiClient):
                 "temporal_balance": True,
                 "temporal_balance_strength": 1.5
             }
-            chosen = pick_random_movie(filtered_results, preferences=prefs, seed=None)
+            
+            # 单个推荐也排除已推荐过的电影
+            filtered_for_single = [m for m in filtered_results if m.get("id") not in recently_recommended_ids]
+            if len(filtered_for_single) < 10:  # 如果过滤后太少，使用原始列表
+                filtered_for_single = filtered_results
+            
+            chosen = pick_random_movie(filtered_for_single, preferences=prefs, seed=random.randint(1, 10000))
             if not chosen:
                 chosen = random.choice(filtered_results if filtered_results else results)
+            
+            # 记录推荐ID
+            if "id" in chosen and chosen["id"]:
+                recently_recommended_ids.add(chosen["id"])
+            
+            # 限制记忆集合大小
+            if len(recently_recommended_ids) > 50:
+                recently_recommended_ids = set(list(recently_recommended_ids)[-30:])
+            
             chosen_disp = dict(chosen)
             gids = chosen.get("genre_ids") or []
             if isinstance(gids, (list, tuple)) and id_to_name:
@@ -524,10 +846,17 @@ def interactive_loop(client: ApiClient):
                         print("⚠️ 收藏失败。")
                 else:
                     print("⚠️ 尚未展示任何影片，无法收藏。")
+                    
+            # 处理偏好设置命令
+            if cmd == "p":
+                edit_preferences()
+                continue
     except KeyboardInterrupt:
         print("\n👋 已取消。")
 
 def main():
+    # 确保默认偏好文件存在
+    create_default_preferences_if_missing()
     api_key = os.getenv("TMDB_API_KEY") or get_tmdb_key()
     if not api_key:
         print("❗ 未配置 TMDB_API_KEY。请设置环境变量或在 config 中提供。")
@@ -537,7 +866,9 @@ def main():
                       key_type=os.getenv("TMDB_KEY_TYPE", "v3"),
                       timeout=int(os.getenv("REQUEST_TIMEOUT", 30)),
                       max_retries=int(os.getenv("MAX_RETRIES", 2)))
-    interactive_loop(client)
+    # 使用 Requester 包装 client，以便在交互中获得友好提示与一致的错误处理
+    requester = Requester(client)
+    interactive_loop(client, requester)
 
 if __name__ == "__main__":
     main()

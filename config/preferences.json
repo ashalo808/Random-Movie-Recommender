@@ -1,0 +1,12 @@
+{
+  "weights": {
+    "popularity": 0.2,
+    "rating": 0.4,
+    "freshness": 0.4
+  },
+  "temperature": 3.0,
+  "temporal_balance": true,
+  "temporal_balance_strength": 1.5,
+  "diversify_by": "genre",
+  "max_items_per_genre": 2
+}

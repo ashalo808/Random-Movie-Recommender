@@ -1,106 +1,106 @@
+```markdown
 # Random Movie Recommender
 
-[阅读中文版本](./README.zh.md)
+[Read in Chinese](./README.zh.md)
 
-A small CLI tool that picks random movies from TMDb and shows basic info with emojis for readability. Good for learning API usage, JSON handling and simple recommendation logic.
+A web application based on Flask that fetches movie data from TMDb API for random recommendations, supporting caching, favorites, and genre filtering. Suitable for learning API calls, recommendation algorithms, and web development.
 
 ## Features
-- Single or batch random recommendations
-- Shows title, year, rating, genres and short overview (emoji-enhanced)
-- Optional local caching to reduce API calls
-- Simple, testable codebase
+- Random movie recommendations (single or batch, with genre filtering)
+- Display movie details (title, year, rating, genres, overview)
+- Local caching to reduce API requests
+- Web interface: dropdown for genre selection, recommendation buttons, favorites management
+- Persistent favorites (stored in data/favorites.json)
 
 ## Requirements
 - Python 3.8+
+- Flask
 - requests
 
-## Install (Windows PowerShell)
+## Installation
+Run in the project root directory (recommended to use venv):
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt   # or: pip install requests
+pip install -r requirements.txt    # If no requirements.txt, run pip install flask requests
 ```
 
-## Configure TMDb API Key
-Preferred: set environment variable
-```powershell
-$env:TMDB_API_KEY = "your_api_key_here"
-```
+## Configure API Key
+The program uses TMDb API. After obtaining the key, set the environment variable:
 
-Or create a local `config.py` with:
-```python
-def get_tmdb_key():
-    return "your_api_key_here"
-```
+### Get TMDB API Key:
+Visit [TMDB website](https://www.themoviedb.org/), sign up and generate an API key (v3 auth key).
 
-The code prefers the environment variable to avoid committing secrets.
+### Set environment variable in terminal and run:
+1. Stop the current app (Ctrl+C).
+2. In PowerShell:
+   ```
+   $env:TMDB_API_KEY = "YOUR_API_KEY_HERE"
+   python app.py
+   ```
+3. Or in CMD:
+   ```
+   set TMDB_API_KEY=YOUR_API_KEY_HERE
+   python app.py
+   ```
+4. Replace `YOUR_API_KEY_HERE` with your actual key.
+
+### Verification:
+- After restart, visit http://localhost:5000.
+- Check if warnings persist in terminal. If issues remain, confirm the key is correct, and try refreshing the page or clicking the "🔄 Refresh Data" button.
+- For permanent setup (no need to enter each time), add `TMDB_API_KEY` to Windows system environment variables. If problems persist, provide more terminal output.
+
+> Prefer environment variables to avoid committing secrets to the repository.
 
 ## Run
+Execute directly in the activated virtual environment:
 ```powershell
-python main.py
+python app.py
 ```
+Then open http://localhost:5000 in your browser to use the web interface.
 
-### Interactive keys
-- Enter: recommend one movie  
-- b: batch recommend (3 movies)  
-- r: refresh (re-fetch from API)  
-- q: quit
-
-## Tests (pytest)
+## Tests
+The project includes pytest test cases (tests/). Run:
 ```powershell
 pip install pytest
 python -m pytest -q
 ```
 
-## Project layout (summary)
+## Project Structure
 ```
 Random Movie Recommender/
-├─ data/                      # cache files
+├─ data/                      # Cache data and favorites (favorites.json)
 ├─ src/
-│  ├─ api_client.py
-│  ├─ requester.py
-│  ├─ endpoints.py
-│  ├─ factory.py
-│  ├─ storage.py
-│  ├─ recommenders.py
-│  └─ utils.py
-├─ main.py
-├─ config.py (optional)
-└─ README.en.md
+│  ├─ api_client.py          # TMDb API client
+│  ├─ requester.py           # Request wrapper
+│  ├─ endpoints.py           # API endpoint handling
+│  ├─ factory.py             # Client factory
+│  ├─ storage.py             # Data storage and caching
+│  ├─ recommenders.py        # Recommendation algorithms
+│  ├─ utils.py               # Utility functions (formatting, filtering, etc.)
+│  ├─ preferences.py         # User preference settings
+│  ├─ retry_policy.py        # Retry policy
+├─ tests/                     # Unit tests
+│  ├─ test_api.py
+│  ├─ test_endpoints.py
+│  ├─ test_factory.py
+│  ├─ test_recommenders.py
+│  ├─ test_storage.py
+│  ├─ test_utils.py
+│  └─ conftest.py
+├─ app.py                     # Flask backend application
+├─ index.html                 # Web frontend interface
+├─ config.py (optional)       # Configuration (optional)
+└─ README.md
 ```
 
 ## Troubleshooting
-- Many same-year results after refresh: check pagination/random-page selection and caching keys include page/query.  
-- API errors: verify `TMDB_API_KEY` and network/proxy settings.
-
-## Planned improvements (short-term priorities)
-
-The project roadmap prioritizes usability, reliability and user features. The next planned items are:
-
-1. Genre filter & fuzzy matching (priority: High)
-   - Allow users to request recommendations filtered by genre (English/Chinese).
-   - Use TMDb /genre/movie/list for name→id mapping; fallback to fuzzy matching on movie.genres, genre_ids, title or overview.
-   - CLI/interactive: initial prompt and `g` command to set/clear genre.
-   - Acceptance: setting a known genre returns only matching movies; unknown genre falls back with notice.
-
-2. Tests and CI (priority: High)
-   - Add unit tests for core modules (storage, recommenders, utils, genre filtering).
-   - Use request mocking (responses / requests-mock) to simulate TMDb.
-   - Add GitHub Actions workflow to run pytest on push/PR.
-   - Acceptance: tests run in CI; core logic covered by unit tests.
-
-3. Better cache (per-query caching) (priority: Medium)
-   - Cache results per query hash (include query params & page) instead of a single global cache file.
-   - Keep TTL, support manual cache clear and forced refresh (`r`).
-   - Acceptance: different queries use separate cache files; forced refresh bypasses cache.
-
-4. Favorites (persisted user prefs) (priority: Medium)
-   - Allow users to save favorites locally (data/favorites.json), list and remove favorites.
-   - Interactive commands: `f` to save current, `fav-list`, `fav-remove`.
-   - Acceptance: favorites persisted, import/export as JSON supported.
+- No options in dropdown: Ensure TMDB_API_KEY is set correctly, check for 500 errors in terminal.
+- Repeated recommendations: Check caching strategy, ensure random pages and query parameters are handled properly.
+- API request failures: Confirm network/proxy and TMDB_API_KEY are correct.
 
 ## Contributing
-PRs and issues welcome. Please include tests for behavior changes.
+Welcome to submit issues or PRs. Please explain the purpose of changes in PRs and include unit tests if applicable.
 
 ## License
 MIT
